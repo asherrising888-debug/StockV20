@@ -4,14 +4,18 @@ import pandas as pd
 import numpy as np
 import os
 import time
+import warnings
 from datetime import datetime, timedelta
 
-# ==================== ⚙️ 核心配置 (V20.2 Web版) ====================
-st.set_page_config(page_title="V20.2 战略指挥舱", layout="wide", page_icon="🚀")
+# 忽略警告
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# ==================== ⚙️ 核心配置 (V20.6 Web版) ====================
+st.set_page_config(page_title="V20.6 战略指挥舱", layout="wide", page_icon="🚀")
 
 STOCK_DIR = "./stock_data_v20"
 
-# 2030 战略核心资产池
+# 2030 战略核心资产池 (完整版)
 STRATEGIC_POOL = {
     "002230": ("科大讯飞", "AI模型"), "688256": ("寒武纪", "AI芯片"),
     "000977": ("浪潮信息", "服务器"), "603019": ("中科曙光", "超算"),
@@ -58,7 +62,7 @@ PARAMS = {
     'VOL_MIN': 1.0, 'VOL_MAX': 2.5, 'STOP_LOSS': -0.08
 }
 
-# ==================== 核心算法 ====================
+# ==================== 核心算法 (V20.6) ====================
 class AlgoEngine:
     @staticmethod
     def get_snapshot():
@@ -78,30 +82,23 @@ class AlgoEngine:
     def sync_history():
         if not os.path.exists(STOCK_DIR): os.makedirs(STOCK_DIR)
         
-        # 使用 Streamlit 的 status 组件显示进度
         status = st.status("📡 正在同步数据...", expanded=True)
-        
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=800)).strftime("%Y%m%d")
         
         # 1. 大盘
         try:
-            status.write("正在下载沪深300指数...")
-            try:
-                df = ak.stock_zh_index_daily_em(symbol="sh000300")
-            except:
-                df = ak.stock_zh_index_daily(symbol="sh000300")
-            
-            rename_map = {'date': '日期', 'close': '收盘', 'open': '开盘', 'high': '最高', 'low': '最低', 'volume': '成交量'}
-            df.rename(columns=rename_map, inplace=True)
+            status.write("下载沪深300指数...")
+            try: df = ak.stock_zh_index_daily_em(symbol="sh000300")
+            except: df = ak.stock_zh_index_daily(symbol="sh000300")
+            df.rename(columns={'date': '日期', 'close': '收盘', 'open': '开盘', 'high': '最高', 'low': '最低', 'volume': '成交量'}, inplace=True)
             df.to_csv(os.path.join(STOCK_DIR, "sh000300.csv"), index=False)
         except Exception as e:
             status.write(f"⚠️ 大盘同步警告: {e}")
 
         # 2. 个股
         status.write(f"正在同步 {len(STRATEGIC_POOL)} 只核心资产...")
-        progress_bar = status.progress(0)
-        
+        bar = status.progress(0)
         cnt = 0
         total = len(STRATEGIC_POOL)
         for i, code in enumerate(STRATEGIC_POOL.keys()):
@@ -111,14 +108,14 @@ class AlgoEngine:
                     df.to_csv(os.path.join(STOCK_DIR, f"{code}.csv"), index=False)
                     cnt += 1
             except: pass
-            progress_bar.progress((i + 1) / total)
+            bar.progress((i + 1) / total)
             
         status.update(label=f"✅ 同步完成！覆盖 {cnt} 只股票。", state="complete", expanded=False)
 
     @staticmethod
     def get_market_status():
         path = os.path.join(STOCK_DIR, "sh000300.csv")
-        if not os.path.exists(path): return False, 0, 0, "无数据，请先同步"
+        if not os.path.exists(path): return False, 0, 0, "无数据"
         try:
             df = pd.read_csv(path)
             if 'date' in df.columns: df.rename(columns={'date':'日期', 'close':'收盘'}, inplace=True)
@@ -158,6 +155,7 @@ class AlgoEngine:
             df_w = df.resample('W-FRI').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'})
             close = df_w['close']
             
+            # 指标 (EMA算法)
             df_w['MA20'] = close.rolling(PARAMS['MA_LIFE']).mean()
             df_w['MA20_Up'] = df_w['MA20'] > df_w['MA20'].shift(1)
             df_w['Vol_MA20'] = df_w['volume'].rolling(PARAMS['VOL_MA']).mean()
@@ -192,14 +190,13 @@ class AlgoEngine:
         except: return None
 
 # ==================== Web 界面 ====================
-st.title("🚀 A股 V20.2 实战指挥舱")
+st.title("🚀 A股 V20.6 终极实战指挥舱")
 st.markdown("---")
 
-# 侧边栏配置
+# 侧边栏
 with st.sidebar:
     st.header("1. 战前整备")
     if st.button("🔄 同步最新数据 (周五必点)", type="primary"):
-        # === 修复点：调用时不传参数 ===
         AlgoEngine.sync_history()
         
     cash = st.number_input("可用资金 (元):", value=20000.0, step=1000.0)
@@ -209,7 +206,7 @@ with st.sidebar:
     st.caption("格式: 代码,成本,股数,最高价 (V12必填)")
     pos_input = st.text_area("输入:", height=100, placeholder="601138, 22.5, 500, 25.0")
 
-# 主程序
+# 主逻辑
 if st.button("🚀 启动全流程诊断", use_container_width=True):
     
     # 0. 解析持仓
@@ -278,13 +275,13 @@ if st.button("🚀 启动全流程诊断", use_container_width=True):
 
     # --- Step 3: 选股 ---
     if is_bull:
-        st.subheader("🔍 Step 3: 选股全景透视")
+        st.subheader("🔍 Step 3: 选股全景透视 (含资金前置过滤)")
         
         candidates = []
         table_data = []
         
         # 进度条
-        progress_text = "正在扫描 60+ 只核心资产..."
+        progress_text = "正在扫描..."
         my_bar = st.progress(0, text=progress_text)
         total_scan = len(STRATEGIC_POOL)
         
@@ -303,7 +300,10 @@ if st.button("🚀 启动全流程诊断", use_container_width=True):
             if not (PARAMS['RSI_MIN'] <= d['RSI'] <= PARAMS['RSI_MAX']): why.append(f"RSI({d['RSI']:.0f})")
             if not (PARAMS['VOL_MIN'] <= d['Vol_Ratio'] <= PARAMS['VOL_MAX']): why.append(f"量({d['Vol_Ratio']:.1f})")
             if not d['Structure_OK']: why.append("结构差")
-            if d['close']*100 > simulated_cash: why.append("买不起")
+            
+            # === 🛠️ 关键逻辑：资金门槛前置过滤 ===
+            cost_per_hand = d['close'] * 100
+            if cost_per_hand > simulated_cash: why.append(f"资金不足({cost_per_hand:.0f})")
             
             if not why:
                 res = "✅"
@@ -316,16 +316,13 @@ if st.button("🚀 启动全流程诊断", use_container_width=True):
             })
             
         my_bar.empty()
-        
-        # 显示透视表
-        df_table = pd.DataFrame(table_data)
-        st.dataframe(df_table, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
         # --- Step 4: 决策 ---
         st.subheader("💡 Step 4: 最终指令")
         
         if not candidates:
-            st.warning("扫描结束，无符合V19标准标的。")
+            st.warning("扫描结束，无标的。")
         else:
             candidates.sort(key=lambda x: (x['RSI'], x['Amount']), reverse=True)
             target = candidates[0]
@@ -335,11 +332,19 @@ if st.button("🚀 启动全流程诊断", use_container_width=True):
                 st.warning("V12仓位已满，停止买入。")
             else:
                 shares = int(invest / target['close'] / 100) * 100
+                
+                # === 🛠️ 关键逻辑：强制保底买一手 ===
+                if shares < 100:
+                    if simulated_cash >= target['close'] * 100:
+                        shares = 100
+                        st.info("⚠️ 策略分配资金不足，但总现金足够，启用【强制保底】买入1手。")
+                    else:
+                        st.error(f"选中 {target['name']}，但连1手都买不起 (需{target['close']*100:.0f})。")
+                        shares = 0
+                
                 if shares >= 100:
                     st.success(f"⭐⭐⭐ 买入指令: {target['name']} ({target['code']})")
-                    st.write(f"数量: **{shares}** 股 | RSI: **{target['RSI']:.1f}**")
+                    st.metric("买入数量", f"{shares} 股", f"RSI: {target['RSI']:.1f}")
                     st.caption(f"预计耗资: {shares * target['close']:.2f} 元")
-                else:
-                    st.error(f"选中 {target['name']}，但资金不足买入一手。")
     else:
         st.error("大盘红灯，停止选股。")
