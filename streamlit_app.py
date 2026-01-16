@@ -62,11 +62,13 @@ PARAMS = {
     'VOL_MIN': 1.0, 'VOL_MAX': 2.5, 'STOP_LOSS': -0.08
 }
 
-# ==================== 核心算法 (V20.6) ====================
+# ==================== 核心算法 ====================
 class AlgoEngine:
     @staticmethod
     def get_snapshot():
+        """尝试获取实时数据，失败则返回None"""
         try:
+            # 这是一个耗时操作，在云端容易超时
             df = ak.stock_zh_a_spot_em()
             snap = {}
             for _, row in df.iterrows():
@@ -91,7 +93,8 @@ class AlgoEngine:
             status.write("下载沪深300指数...")
             try: df = ak.stock_zh_index_daily_em(symbol="sh000300")
             except: df = ak.stock_zh_index_daily(symbol="sh000300")
-            df.rename(columns={'date': '日期', 'close': '收盘', 'open': '开盘', 'high': '最高', 'low': '最低', 'volume': '成交量'}, inplace=True)
+            rename_map = {'date': '日期', 'close': '收盘', 'open': '开盘', 'high': '最高', 'low': '最低', 'volume': '成交量'}
+            df.rename(columns=rename_map, inplace=True)
             df.to_csv(os.path.join(STOCK_DIR, "sh000300.csv"), index=False)
         except Exception as e:
             status.write(f"⚠️ 大盘同步警告: {e}")
@@ -115,7 +118,7 @@ class AlgoEngine:
     @staticmethod
     def get_market_status():
         path = os.path.join(STOCK_DIR, "sh000300.csv")
-        if not os.path.exists(path): return False, 0, 0, "无数据"
+        if not os.path.exists(path): return False, 0, 0, "请先同步数据"
         try:
             df = pd.read_csv(path)
             if 'date' in df.columns: df.rename(columns={'date':'日期', 'close':'收盘'}, inplace=True)
@@ -144,6 +147,7 @@ class AlgoEngine:
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
             
+            # 拼接实时数据 (如果有)
             if snapshot and code in snapshot:
                 real = snapshot[code]
                 today = datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)
@@ -190,7 +194,7 @@ class AlgoEngine:
         except: return None
 
 # ==================== Web 界面 ====================
-st.title("🚀 A股 V20.6 终极实战指挥舱")
+st.title("🚀 A股 V20.6 实战指挥舱")
 st.markdown("---")
 
 # 侧边栏
@@ -206,10 +210,10 @@ with st.sidebar:
     st.caption("格式: 代码,成本,股数,最高价 (V12必填)")
     pos_input = st.text_area("输入:", height=100, placeholder="601138, 22.5, 500, 25.0")
 
-# 主逻辑
+# 主程序
 if st.button("🚀 启动全流程诊断", use_container_width=True):
     
-    # 0. 解析持仓
+    # 解析持仓
     positions = []
     if pos_input:
         for line in pos_input.split('\n'):
@@ -218,16 +222,19 @@ if st.button("🚀 启动全流程诊断", use_container_width=True):
                 try: positions.append({'code':p[0].strip(), 'cost':float(p[1]), 'shares':int(p[2]), 'high':float(p[3]) if len(p)>3 else float(p[1])})
                 except: pass
 
-    # 获取快照
-    snapshot = AlgoEngine.get_snapshot()
-    if not snapshot: st.error("⚠️ 实时数据获取失败，使用历史数据近似。")
+    # 获取快照 (增加容错)
+    with st.spinner("正在获取实时行情..."):
+        snapshot = AlgoEngine.get_snapshot()
+        if not snapshot: 
+            st.warning("⚠️ 实时数据获取失败，正在使用历史数据（昨日收盘）进行计算...")
+            # 快照为 None 时，calc_indicators 会自动只读历史文件，不报错
     
     # --- Step 1: 环境 ---
     st.subheader("📊 Step 1: 市场环境")
     is_bull, idx_price, idx_ma, idx_date = AlgoEngine.get_market_status()
     
     if idx_price == 0:
-        st.error(f"❌ 数据错误: {idx_date}。请先点击左侧【同步最新数据】！")
+        st.error(f"❌ 数据缺失 ({idx_date})。请先点击侧边栏的【同步最新数据】！")
     else:
         col1, col2, col3 = st.columns(3)
         col1.metric("沪深300", f"{idx_price:.2f}")
@@ -235,116 +242,115 @@ if st.button("🚀 启动全流程诊断", use_container_width=True):
         col3.metric("状态", "🟢 牛市" if is_bull else "🔴 熊市")
         st.caption(f"数据基准日: {idx_date}")
 
-    # --- Step 2: 持仓 ---
-    st.subheader("🛡️ Step 2: 持仓诊断")
-    simulated_cash = cash
-    active_pos = 0
-    
-    if positions:
-        for p in positions:
-            d = AlgoEngine.calc_indicators(p['code'], snapshot)
-            if not d: continue
-            
-            price = d['close']
-            pct = (price - p['cost']) / p['cost'] if p['cost']!=0 else 0
-            
-            reason = None
-            if pct <= PARAMS['STOP_LOSS']: reason = f"硬止损(亏{pct:.1%})"
-            elif price < d['MA20'] and not d['MA20_Up']: reason = "趋势破坏"
-            
-            if "V12" in mode:
-                stop_line = p['high'] - (3.0 * d['ATR'])
-                if price < stop_line: reason = f"ATR止盈(破{stop_line:.2f})"
-            
-            c1, c2 = st.columns([3, 1])
-            with c1:
-                st.write(f"**{d['name']}** ({p['code']})")
-                st.caption(f"现价:{price} | 成本:{p['cost']} | 盈亏:{pct:.2%}")
-                if "V12" in mode: st.caption(f"最高价:{p['high']} | 止盈线:{stop_line:.2f}")
-            with c2:
-                if reason:
-                    st.error(f"❌ 卖出\n{reason}")
-                    simulated_cash += price * p['shares']
-                else:
-                    st.success("✅ 持有")
-                    active_pos += 1
-                    if price > p['high']: st.info("创新高!请更新")
-            st.divider()
-    else:
-        st.info("当前空仓")
-
-    # --- Step 3: 选股 ---
-    if is_bull:
-        st.subheader("🔍 Step 3: 选股全景透视 (含资金前置过滤)")
+        # --- Step 2: 持仓 ---
+        st.subheader("🛡️ Step 2: 持仓诊断")
+        simulated_cash = cash
+        active_pos = 0
         
-        candidates = []
-        table_data = []
-        
-        # 进度条
-        progress_text = "正在扫描..."
-        my_bar = st.progress(0, text=progress_text)
-        total_scan = len(STRATEGIC_POOL)
-        
-        for i, code in enumerate(STRATEGIC_POOL):
-            my_bar.progress((i + 1) / total_scan)
-            if any(p['code'] == code for p in positions): continue
-            
-            d = AlgoEngine.calc_indicators(code, snapshot)
-            if not d: continue
-            
-            res = "❌"
-            why = []
-            
-            if not (d['MA20_Up'] and d['close'] > d['MA20']): why.append("MA20向下")
-            if d['Bias'] > PARAMS['BIAS_LIMIT']: why.append(f"位置高({d['Bias']:.2f})")
-            if not (PARAMS['RSI_MIN'] <= d['RSI'] <= PARAMS['RSI_MAX']): why.append(f"RSI({d['RSI']:.0f})")
-            if not (PARAMS['VOL_MIN'] <= d['Vol_Ratio'] <= PARAMS['VOL_MAX']): why.append(f"量({d['Vol_Ratio']:.1f})")
-            if not d['Structure_OK']: why.append("结构差")
-            
-            # === 🛠️ 关键逻辑：资金门槛前置过滤 ===
-            cost_per_hand = d['close'] * 100
-            if cost_per_hand > simulated_cash: why.append(f"资金不足({cost_per_hand:.0f})")
-            
-            if not why:
-                res = "✅"
-                candidates.append(d)
+        if positions:
+            for p in positions:
+                d = AlgoEngine.calc_indicators(p['code'], snapshot)
+                if not d: continue
                 
-            table_data.append({
-                "代码": code, "名称": d['name'], "现价": f"{d['close']:.2f}",
-                "RSI": f"{d['RSI']:.1f}", "MA20": "⬆️" if d['MA20_Up'] else "⬇️",
-                "诊断": res, "原因": " ".join(why)
-            })
-            
-        my_bar.empty()
-        st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
-
-        # --- Step 4: 决策 ---
-        st.subheader("💡 Step 4: 最终指令")
-        
-        if not candidates:
-            st.warning("扫描结束，无标的。")
-        else:
-            candidates.sort(key=lambda x: (x['RSI'], x['Amount']), reverse=True)
-            target = candidates[0]
-            
-            invest = simulated_cash * 0.5 if "V11" in mode or active_pos == 0 else simulated_cash * 0.99
-            if active_pos >= 2 and "V12" in mode:
-                st.warning("V12仓位已满，停止买入。")
-            else:
-                shares = int(invest / target['close'] / 100) * 100
+                price = d['close']
+                pct = (price - p['cost']) / p['cost'] if p['cost']!=0 else 0
                 
-                # === 🛠️ 关键逻辑：强制保底买一手 ===
-                if shares < 100:
-                    if simulated_cash >= target['close'] * 100:
-                        shares = 100
-                        st.info("⚠️ 策略分配资金不足，但总现金足够，启用【强制保底】买入1手。")
+                reason = None
+                if pct <= PARAMS['STOP_LOSS']: reason = f"硬止损(亏{pct:.1%})"
+                elif price < d['MA20'] and not d['MA20_Up']: reason = "趋势破坏"
+                
+                if "V12" in mode:
+                    stop_line = p['high'] - (3.0 * d['ATR'])
+                    if price < stop_line: reason = f"ATR止盈(破{stop_line:.2f})"
+                
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.write(f"**{d['name']}** ({p['code']})")
+                    st.caption(f"现价:{price} | 成本:{p['cost']} | 盈亏:{pct:.2%}")
+                    if "V12" in mode: st.caption(f"最高价:{p['high']} | 止盈线:{stop_line:.2f}")
+                with c2:
+                    if reason:
+                        st.error(f"❌ 卖出\n{reason}")
+                        simulated_cash += price * p['shares']
                     else:
-                        st.error(f"选中 {target['name']}，但连1手都买不起 (需{target['close']*100:.0f})。")
-                        shares = 0
+                        st.success("✅ 持有")
+                        active_pos += 1
+                        if price > p['high']: st.info("创新高!请更新")
+                st.divider()
+        else:
+            st.info("当前空仓")
+
+        # --- Step 3: 选股 ---
+        if is_bull:
+            st.subheader("🔍 Step 3: 选股全景透视")
+            
+            candidates = []
+            table_data = []
+            
+            progress_text = "正在扫描 60+ 只核心资产..."
+            my_bar = st.progress(0, text=progress_text)
+            total_scan = len(STRATEGIC_POOL)
+            
+            for i, code in enumerate(STRATEGIC_POOL):
+                my_bar.progress((i + 1) / total_scan)
+                if any(p['code'] == code for p in positions): continue
                 
-                if shares >= 100:
-                    st.success(f"⭐⭐⭐ 买入指令: {target['name']} ({target['code']})")
-                    st.metric("买入数量", f"{shares} 股", f"RSI: {target['RSI']:.1f}")
-                    st.caption(f"预计耗资: {shares * target['close']:.2f} 元")
-    else:
-        st.error("大盘红灯，停止选股。")
+                d = AlgoEngine.calc_indicators(code, snapshot)
+                if not d: continue
+                
+                res = "❌"
+                why = []
+                
+                if not (d['MA20_Up'] and d['close'] > d['MA20']): why.append("MA20向下")
+                if d['Bias'] > PARAMS['BIAS_LIMIT']: why.append(f"位置高({d['Bias']:.2f})")
+                if not (PARAMS['RSI_MIN'] <= d['RSI'] <= PARAMS['RSI_MAX']): why.append(f"RSI({d['RSI']:.0f})")
+                if not (PARAMS['VOL_MIN'] <= d['Vol_Ratio'] <= PARAMS['VOL_MAX']): why.append(f"量({d['Vol_Ratio']:.1f})")
+                if not d['Structure_OK']: why.append("结构差")
+                
+                # 资金过滤
+                cost_per_hand = d['close'] * 100
+                if cost_per_hand > simulated_cash: why.append(f"资金不足({cost_per_hand:.0f})")
+                
+                if not why:
+                    res = "✅"
+                    candidates.append(d)
+                    
+                table_data.append({
+                    "代码": code, "名称": d['name'], "现价": f"{d['close']:.2f}",
+                    "RSI": f"{d['RSI']:.1f}", "MA20": "⬆️" if d['MA20_Up'] else "⬇️",
+                    "诊断": res, "原因": " ".join(why)
+                })
+                
+            my_bar.empty()
+            st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
+
+            # --- Step 4: 决策 ---
+            st.subheader("💡 Step 4: 最终指令")
+            
+            if not candidates:
+                st.warning("扫描结束，无符合V19标准标的。")
+            else:
+                candidates.sort(key=lambda x: (x['RSI'], x['Amount']), reverse=True)
+                target = candidates[0]
+                
+                invest = simulated_cash * 0.5 if "V11" in mode or active_pos == 0 else simulated_cash * 0.99
+                if active_pos >= 2 and "V12" in mode:
+                    st.warning("V12仓位已满，停止买入。")
+                else:
+                    shares = int(invest / target['close'] / 100) * 100
+                    
+                    # 强制保底逻辑
+                    if shares < 100:
+                        if simulated_cash >= target['close'] * 100:
+                            shares = 100
+                            st.info("⚠️ 策略分配资金不足，但总现金足够，启用【强制保底】买入1手。")
+                        else:
+                            shares = 0
+                            st.error(f"选中 {target['name']}，但连1手都买不起。")
+
+                    if shares >= 100:
+                        st.success(f"⭐⭐⭐ 买入指令: {target['name']} ({target['code']})")
+                        st.write(f"数量: **{shares}** 股 | RSI: **{target['RSI']:.1f}**")
+                        st.caption(f"预计耗资: {shares * target['close']:.2f} 元")
+        else:
+            st.error("大盘红灯，停止选股。")
