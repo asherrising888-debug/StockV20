@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ==================== ⚙️ 核心配置 ====================
-st.set_page_config(page_title="V20.6 极速指挥舱", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="V20.6 战略指挥舱", layout="wide", page_icon="🚀")
 
 STOCK_DIR = "./stock_data_v20"
 
@@ -289,7 +289,6 @@ PARAMS = {
 class AlgoEngine:
     @staticmethod
     def get_snapshot():
-        """获取全市场实时快照 (不缓存，保证实时性)"""
         try:
             df = ak.stock_zh_a_spot_em()
             snap = {}
@@ -304,10 +303,9 @@ class AlgoEngine:
 
     @staticmethod
     def sync_history():
-        """下载历史数据 (手动触发)"""
         if not os.path.exists(STOCK_DIR): os.makedirs(STOCK_DIR)
         
-        status = st.status("📡 正在同步历史数据...", expanded=True)
+        status = st.status("📡 正在同步数据...", expanded=True)
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=800)).strftime("%Y%m%d")
         
@@ -335,86 +333,8 @@ class AlgoEngine:
                     cnt += 1
             except: pass
             bar.progress((i + 1) / total)
-        
-        # 清除缓存，强制下次重新读取新文件
-        st.cache_data.clear()
+            
         status.update(label=f"✅ 同步完成！覆盖 {cnt} 只股票。", state="complete", expanded=False)
-
-    @staticmethod
-    @st.cache_data(ttl=3600) # 缓存历史读取，1小时失效，提升速度
-    def get_history_df(code):
-        """读取本地历史CSV"""
-        path = os.path.join(STOCK_DIR, f"{code}.csv")
-        if not os.path.exists(path): return None
-        try:
-            df = pd.read_csv(path)
-            rename_map = {'日期':'date', '开盘':'open', '收盘':'close', '最高':'high', '最低':'low', '成交量':'volume'}
-            df.rename(columns=rename_map, inplace=True)
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-            return df
-        except: return None
-
-    @staticmethod
-    def process_stock(code, snapshot_data):
-        """核心计算逻辑"""
-        # 1. 获取缓存的历史数据
-        df = AlgoEngine.get_history_df(code)
-        if df is None: return None
-        
-        try:
-            # 2. 拼接实时数据 (必须深拷贝，防止污染缓存)
-            df = df.copy()
-            
-            if snapshot_data:
-                today = datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)
-                if today not in df.index:
-                    df.loc[today] = [snapshot_data['open'], snapshot_data['close'], snapshot_data['high'], snapshot_data['low'], snapshot_data['volume']] + [0]*(len(df.columns)-5)
-                else:
-                    # 如果今天已有数据(比如盘后同步过)，用快照覆盖
-                    df.loc[today, ['open','close','high','low','volume']] = [snapshot_data['open'], snapshot_data['close'], snapshot_data['high'], snapshot_data['low'], snapshot_data['volume']]
-            
-            # 3. 周线重采样
-            df_w = df.resample('W-FRI').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'})
-            close = df_w['close']
-            
-            # 4. 指标计算 (V19.3标准)
-            df_w['MA20'] = close.rolling(PARAMS['MA_LIFE']).mean()
-            df_w['MA20_Up'] = df_w['MA20'] > df_w['MA20'].shift(1)
-            df_w['Vol_MA20'] = df_w['volume'].rolling(PARAMS['VOL_MA']).mean()
-            
-            # RSI (EMA)
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).ewm(com=PARAMS['RSI_N']-1, adjust=False).mean()
-            loss = (-delta.where(delta < 0, 0)).ewm(com=PARAMS['RSI_N']-1, adjust=False).mean()
-            rs = gain / loss
-            df_w['RSI'] = 100 - (100 / (1 + rs))
-            
-            # ATR (EMA)
-            tr1 = df_w['high'] - df_w['low']
-            tr2 = abs(df_w['high'] - close.shift(1))
-            tr3 = abs(df_w['low'] - close.shift(1))
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            df_w['ATR'] = tr.ewm(com=PARAMS['ATR_N']-1, adjust=False).mean()
-            
-            # 5. 提取结果
-            cur = df_w.iloc[-1].to_dict()
-            cur['code'] = code
-            cur['name'] = STRATEGIC_POOL[code][0]
-            cur['ind'] = STRATEGIC_POOL[code][1]
-            cur['date_str'] = df_w.index[-1].strftime("%Y-%m-%d")
-            
-            # 逻辑参数
-            cur['Bias'] = cur['close'] / cur['MA20'] if cur['MA20'] else 0
-            cur['Vol_Ratio'] = cur['volume'] / cur['Vol_MA20'] if cur['Vol_MA20']>0 else 0
-            cur['Amount'] = cur['close'] * cur['volume']
-            
-            body = abs(cur['close'] - cur['open'])
-            upper = cur['high'] - max(cur['open'], cur['close'])
-            cur['Structure_OK'] = body >= upper
-            
-            return cur
-        except: return None
 
     @staticmethod
     def get_market_status():
@@ -422,9 +342,7 @@ class AlgoEngine:
         if not os.path.exists(path): return False, 0, 0, "无数据，请先同步"
         try:
             df = pd.read_csv(path)
-            rename_map = {'date': '日期', 'close': '收盘', 'open': '开盘', 'high': '最高', 'low': '最低', 'volume': '成交量'}
-            df.rename(columns=rename_map, inplace=True)
-            
+            if 'date' in df.columns: df.rename(columns={'date':'日期', 'close':'收盘'}, inplace=True)
             df['日期'] = pd.to_datetime(df['日期'])
             df.set_index('日期', inplace=True)
             
@@ -438,6 +356,62 @@ class AlgoEngine:
             date_str = df_w.index[-1].strftime("%Y-%m-%d")
             return is_bull, last['收盘'], last['MA40'], date_str
         except Exception as e: return False, 0, 0, str(e)
+
+    @staticmethod
+    def calc_indicators(code, snapshot):
+        path = os.path.join(STOCK_DIR, f"{code}.csv")
+        if not os.path.exists(path): return None
+        try:
+            df = pd.read_csv(path)
+            rename_map = {'日期':'date', '开盘':'open', '收盘':'close', '最高':'high', '最低':'low', '成交量':'volume'}
+            df.rename(columns=rename_map, inplace=True)
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            
+            if snapshot and code in snapshot:
+                real = snapshot[code]
+                today = datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)
+                if today not in df.index:
+                    df.loc[today] = [real['open'], real['close'], real['high'], real['low'], real['volume']] + [0]*(len(df.columns)-5)
+                else:
+                    df.loc[today, ['open','close','high','low','volume']] = [real['open'], real['close'], real['high'], real['low'], real['volume']]
+            
+            df_w = df.resample('W-FRI').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'})
+            close = df_w['close']
+            
+            # 指标 (EMA算法)
+            df_w['MA20'] = close.rolling(PARAMS['MA_LIFE']).mean()
+            df_w['MA20_Up'] = df_w['MA20'] > df_w['MA20'].shift(1)
+            df_w['Vol_MA20'] = df_w['volume'].rolling(PARAMS['VOL_MA']).mean()
+            
+            delta = close.diff()
+            gain = (delta.where(delta > 0, 0)).ewm(com=PARAMS['RSI_N']-1, adjust=False).mean()
+            loss = (-delta.where(delta < 0, 0)).ewm(com=PARAMS['RSI_N']-1, adjust=False).mean()
+            rs = gain / loss
+            df_w['RSI'] = 100 - (100 / (1 + rs))
+            
+            tr1 = df_w['high'] - df_w['low']
+            tr2 = abs(df_w['high'] - close.shift(1))
+            tr3 = abs(df_w['low'] - close.shift(1))
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            df_w['ATR'] = tr.ewm(com=PARAMS['ATR_N']-1, adjust=False).mean()
+            
+            cur = df_w.iloc[-1].to_dict()
+            cur['code'] = code
+            cur['name'] = STRATEGIC_POOL[code][0]
+            cur['ind'] = STRATEGIC_POOL[code][1]
+            cur['date_str'] = df_w.index[-1].strftime("%Y-%m-%d")
+            
+            cur['Bias'] = cur['close'] / cur['MA20'] if cur['MA20'] else 0
+            cur['Vol_Ratio'] = cur['volume'] / cur['Vol_MA20'] if cur['Vol_MA20']>0 else 0
+            cur['Amount'] = cur['close'] * cur['volume']
+            
+            body = abs(cur['close'] - cur['open'])
+            upper = cur['high'] - max(cur['open'], cur['close'])
+            cur['Structure_OK'] = body >= upper
+            
+            return cur
+        except: return None
 
 # ==================== Web 界面 ====================
 st.title("🚀 A股 V20.6 极速实战指挥舱")
@@ -457,7 +431,7 @@ with st.sidebar:
     pos_input = st.text_area("输入:", height=100, placeholder="601138, 22.5, 500, 25.0")
 
 # 主程序
-if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True):
+if st.button("🚀 启动全流程诊断", use_container_width=True):
     
     # 0. 解析持仓
     positions = []
@@ -468,7 +442,7 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
                 try: positions.append({'code':p[0].strip(), 'cost':float(p[1]), 'shares':int(p[2]), 'high':float(p[3]) if len(p)>3 else float(p[1])})
                 except: pass
 
-    # 获取快照 (每次点击必做，确保实时)
+    # 获取快照 (增加容错)
     with st.spinner("正在获取实时行情..."):
         snapshot = AlgoEngine.get_snapshot()
         if not snapshot: 
@@ -494,7 +468,7 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
         
         if positions:
             for p in positions:
-                d = AlgoEngine.process_stock(p['code'], snapshot.get(p['code']) if snapshot else None)
+                d = AlgoEngine.calc_indicators(p['code'], snapshot)
                 if not d: continue
                 
                 price = d['close']
@@ -512,7 +486,6 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
                 with c1:
                     st.write(f"**{d['name']}** ({p['code']})")
                     st.caption(f"现价:{price} | 成本:{p['cost']} | 盈亏:{pct:.2%}")
-                    st.caption(f"板块: {d['ind']} | 量比: {d['Vol_Ratio']:.1f}")
                     if "V12" in mode: st.caption(f"最高价:{p['high']} | 止盈线:{stop_line:.2f}")
                 with c2:
                     if reason:
@@ -533,7 +506,7 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
             candidates = []
             table_data = []
             
-            progress_text = "极速扫描中..."
+            progress_text = "正在扫描 60+ 只核心资产..."
             my_bar = st.progress(0, text=progress_text)
             total_scan = len(STRATEGIC_POOL)
             
@@ -541,7 +514,7 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
                 my_bar.progress((i + 1) / total_scan)
                 if any(p['code'] == code for p in positions): continue
                 
-                d = AlgoEngine.process_stock(code, snapshot.get(code) if snapshot else None)
+                d = AlgoEngine.calc_indicators(code, snapshot)
                 if not d: continue
                 
                 res = "❌"
@@ -562,28 +535,21 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
                     candidates.append(d)
                     
                 table_data.append({
-                    "代码": code, "名称": d['name'], "板块": d['ind'],
-                    "现价": f"{d['close']:.2f}",
-                    "RSI": f"{d['RSI']:.1f}", 
-                    "乖离": f"{d['Bias']:.2f}",
-                    "量比": f"{d['Vol_Ratio']:.1f}",
+                    "代码": code, "名称": d['name'], "现价": f"{d['close']:.2f}",
+                    "RSI": f"{d['RSI']:.1f}", "MA20": "⬆️" if d['MA20_Up'] else "⬇️",
                     "诊断": res, "原因": " ".join(why)
                 })
                 
             my_bar.empty()
             
-            # 优化表格显示 (添加字段)
+            # 显示表格
             df_table = pd.DataFrame(table_data)
             st.dataframe(
                 df_table, 
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    "诊断": st.column_config.TextColumn(
-                        "诊断",
-                        help="✅表示可买，❌表示淘汰",
-                        validate="^✅"
-                    )
+                    "诊断": st.column_config.TextColumn("诊断", help="✅可买 ❌淘汰", validate="^✅")
                 }
             )
 
@@ -602,7 +568,7 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
                 else:
                     shares = int(invest / target['close'] / 100) * 100
                     
-                    # 强制保底
+                    # 强制保底逻辑
                     if shares < 100:
                         if simulated_cash >= target['close'] * 100:
                             shares = 100
@@ -619,4 +585,3 @@ if st.button("🚀 启动全流程诊断 (极速版)", use_container_width=True)
                         col3.metric("预计耗资", f"{shares * target['close']:.0f} 元")
     else:
         st.error("大盘红灯，停止选股。")
-
